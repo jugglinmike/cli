@@ -66,6 +66,7 @@ for (var module in natives) {
 
 cli.output = console.log;
 cli.exit = require('exit');
+cli.homeDir = require('os-homedir');
 
 cli.no_color = false;
 if (process.env.NODE_DISABLE_COLORS || process.env.TERM === 'dumb') {
@@ -964,6 +965,50 @@ cli.toType = function(obj) {
     return type;
 }
 
+function mkdirp(name, done) {
+    cli.native.fs.mkdir(name, function(mkdirErr) {
+        if (!mkdirErr) {
+            done(null);
+            return;
+        }
+
+        if (mkdirErr.code === 'EEXIST') {
+            cli.native.fs.stat(name, function(statErr, stat) {
+                if (statErr || !stat.isDirectory()) {
+                    done(mkdirErr);
+                    return;
+                }
+                done(null);
+            });
+            return;
+        }
+
+        done(mkdirErr);
+    });
+}
+
+function mkConfigDir(done) {
+    var homeDir = cli.homeDir();
+    var configDir = cli.native.path.join(homeDir, '.config');
+    var cliDir = cli.native.path.join(configDir, 'node-cli');
+
+    mkdirp(configDir, function(err) {
+        if (err) {
+            done(err);
+            return;
+        }
+
+        mkdirp(cliDir, function(err) {
+            if (err) {
+                done(err);
+                return;
+            }
+
+            done(null, cliDir);
+        });
+    });
+}
+
 /**
  * A method for creating and controlling a daemon.
  *
@@ -988,61 +1033,67 @@ cli.daemon = function (arg, callback) {
         arg = 'start';
     }
 
-    var lock_file = '/tmp/' + cli.app + '.pid',
-        log_file = '/tmp/' + cli.app + '.log';
-
-    var start = function () {
-        daemon.daemonize(log_file, lock_file, function (err) {
-            if (err) return cli.error('Error starting daemon: ' + err);
-            callback();
-        });
-    };
-
-    var stop = function () {
-        try {
-            cli.native.fs.readFileSync(lock_file);
-        } catch (e) {
-            return cli.error('Daemon is not running');
+    mkConfigDir(function(err, configDir) {
+        if (err) {
+          cli.fatal(err);
+          return;
         }
-        daemon.kill(lock_file, function (err, pid) {
-            if (err && err.errno === 3) {
+        var lock_file = configDir + '/' + cli.app + '.pid',
+            log_file = configDir + '/' + cli.app + '.log';
+
+        var start = function () {
+            daemon.daemonize(log_file, lock_file, function (err) {
+                if (err) return cli.error('Error starting daemon: ' + err);
+                callback();
+            });
+        };
+
+        var stop = function () {
+            try {
+                cli.native.fs.readFileSync(lock_file);
+            } catch (e) {
                 return cli.error('Daemon is not running');
-            } else if (err) {
-                return cli.error('Error stopping daemon: ' + err.errno);
             }
-            cli.ok('Successfully stopped daemon with pid: ' + pid);
-        });
-    };
+            daemon.kill(lock_file, function (err, pid) {
+                if (err && err.errno === 3) {
+                    return cli.error('Daemon is not running');
+                } else if (err) {
+                    return cli.error('Error stopping daemon: ' + err.errno);
+                }
+                cli.ok('Successfully stopped daemon with pid: ' + pid);
+            });
+        };
 
-    switch(arg) {
-    case 'stop':
-        stop();
-        break;
-    case 'restart':
-        daemon.stop(lock_file, function () {
+        switch(arg) {
+        case 'stop':
+            stop();
+            break;
+        case 'restart':
+            daemon.stop(lock_file, function () {
+                start();
+            });
+            break;
+        case 'log':
+            try {
+                cli.native.fs.createReadStream(log_file, {encoding: 'utf8'}).pipe(process.stdout);
+            } catch (e) {
+                return cli.error('No daemon log file');
+            }
+            break;
+        case 'pid':
+            try {
+                var pid = cli.native.fs.readFileSync(lock_file, 'utf8');
+                cli.native.fs.statSync('/proc/' + pid);
+                cli.info(pid);
+            } catch (e) {
+                return cli.error('Daemon is not running');
+            }
+            break;
+        default:
             start();
-        });
-        break;
-    case 'log':
-        try {
-            cli.native.fs.createReadStream(log_file, {encoding: 'utf8'}).pipe(process.stdout);
-        } catch (e) {
-            return cli.error('No daemon log file');
+            break;
         }
-        break;
-    case 'pid':
-        try {
-            var pid = cli.native.fs.readFileSync(lock_file, 'utf8');
-            cli.native.fs.statSync('/proc/' + pid);
-            cli.info(pid);
-        } catch (e) {
-            return cli.error('Daemon is not running');
-        }
-        break;
-    default:
-        start();
-        break;
-    }
+    });
 }
 
 /**
